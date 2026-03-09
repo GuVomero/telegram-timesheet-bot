@@ -5,7 +5,6 @@ import os
 import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
-from typing import Literal
 import unicodedata
 from zoneinfo import ZoneInfo
 
@@ -132,7 +131,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.effective_message.reply_text(
-        "Comandos: /entrada, /almoco, /entrada_2, /saida, /status, /clear, /corrigir, /mes, /mes_atual, /mes_png, /mes_png_atual, /chat_id\n"
+        "Comandos: /entrada, /almoco, /entrada_2, /saida, /status, /clear, /corrigir, /mes, /mes_png, /chat_id\n"
         "Use /entrada, /almoco, /entrada_2 e /saida para montar a jornada."
     )
 
@@ -159,10 +158,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "[Limpeza]\n"
         "/clear [data] [usuarios] - apaga registros (hoje ou data informada)\n\n"
         "[Relatorios]\n"
-        "/mes - XLSX do mes anterior\n"
-        "/mes_atual - XLSX do mes atual (incompleto)\n"
-        "/mes_png - PNG por usuario do mes anterior\n"
-        "/mes_png_atual - PNG por usuario do mes atual (incompleto)\n\n"
+        "/mes [mes|data] [usuarios] - XLSX (padrao: mes atual)\n"
+        "/mes_png [mes|data] [usuarios] - PNG por usuario (padrao: mes atual)\n"
+        "Aceita mes: YYYY-MM ou MM/YYYY. Tambem aceita data: YYYY-MM-DD ou DD/MM/YYYY.\n\n"
         "[Utilitarios]\n"
         "/chat_id - mostra o id do chat atual\n\n"
         "Regras:\n"
@@ -377,6 +375,29 @@ def _parse_date_input(raw: str) -> date | None:
         return datetime.strptime(raw, "%d/%m/%Y").date()
     except ValueError:
         return None
+
+
+def _parse_month_input(raw: str) -> tuple[int, int] | None:
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    try:
+        dt = datetime.strptime(raw, "%Y-%m")
+        return dt.year, dt.month
+    except ValueError:
+        pass
+
+    try:
+        dt = datetime.strptime(raw, "%m/%Y")
+        return dt.year, dt.month
+    except ValueError:
+        pass
+
+    parsed_day = _parse_date_input(raw)
+    if parsed_day is not None:
+        return parsed_day.year, parsed_day.month
+    return None
 
 
 def _is_time_or_dash(token: str) -> bool:
@@ -678,47 +699,85 @@ def _previous_month(now_local: datetime) -> tuple[int, int]:
     return year, month - 1
 
 
-def _month_window_utc(
+def _month_window_utc_from_year_month(
     tz: ZoneInfo,
-    period: Literal["previous", "current"] = "previous",
-) -> tuple[int, int, datetime, datetime]:
-    now_local = datetime.now(tz)
-    if period == "current":
-        year, month = now_local.year, now_local.month
-    else:
-        year, month = _previous_month(now_local)
+    year: int,
+    month: int,
+) -> tuple[datetime, datetime]:
     start_local = datetime(year, month, 1, 0, 0, 0, tzinfo=tz)
     if month == 12:
         end_local = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=tz)
     else:
         end_local = datetime(year, month + 1, 1, 0, 0, 0, tzinfo=tz)
-    return year, month, start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
 
 def _load_month_data(
     context: CallbackContext,
-    period: Literal["previous", "current"] = "previous",
+    year: int,
+    month: int,
 ) -> tuple[int, int, list]:
     tz: ZoneInfo = context.bot_data["tz"]
     chat_id: int = context.bot_data["target_chat_id"]
-    year, month, start_utc, end_utc = _month_window_utc(tz, period=period)
+    start_utc, end_utc = _month_window_utc_from_year_month(tz, year, month)
     punches = list(list_punches_between(chat_id, start_utc, end_utc))
     return year, month, punches
 
 
+def _parse_report_request(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> tuple[int, int, list[tuple[int, str]] | None, str | None]:
+    tz: ZoneInfo = context.bot_data["tz"]
+    now_local = datetime.now(tz)
+    year, month = now_local.year, now_local.month
+    user_args = context.args
+
+    if context.args:
+        parsed_month = _parse_month_input(context.args[0])
+        if parsed_month is not None:
+            year, month = parsed_month
+            user_args = context.args[1:]
+
+    if not user_args:
+        return year, month, None, None
+
+    chat = update.effective_chat
+    sender = update.effective_user
+    assert chat and sender
+
+    sender_name = _display_name(update)
+    targets, err = _resolve_target_users(
+        chat.id,
+        sender.id,
+        sender_name,
+        user_args,
+        context.bot_data.get("fixed_users"),
+    )
+    if err:
+        return year, month, None, err
+    return year, month, targets, None
+
+
 async def _generate_and_send_month_report(
     context: CallbackContext,
+    year: int,
+    month: int,
+    targets: list[tuple[int, str]] | None = None,
     manual: bool = False,
-    period: Literal["previous", "current"] = "previous",
 ) -> None:
     tz: ZoneInfo = context.bot_data["tz"]
     chat_id: int = context.bot_data["target_chat_id"]
-    year, month, punches = _load_month_data(context, period=period)
+    year, month, punches = _load_month_data(context, year=year, month=month)
+    if targets is not None:
+        target_ids = {user_id for user_id, _ in targets}
+        punches = [p for p in punches if p.user_id in target_ids]
     report_file = build_month_report(punches, str(tz), year, month)
 
     caption = f"Planilha de ponto {month:02d}/{year}"
-    if period == "current":
-        caption += " (mes atual - parcial)"
+    if targets is not None:
+        target_names = ", ".join(user_name for _, user_name in targets)
+        caption += f" (filtrado: {target_names})"
     if manual:
         caption += " (gerada manualmente)"
 
@@ -728,18 +787,21 @@ async def _generate_and_send_month_report(
 
 async def _generate_and_send_month_report_images(
     context: CallbackContext,
+    year: int,
+    month: int,
+    targets: list[tuple[int, str]] | None = None,
     manual: bool = False,
-    period: Literal["previous", "current"] = "previous",
 ) -> None:
     tz: ZoneInfo = context.bot_data["tz"]
     chat_id: int = context.bot_data["target_chat_id"]
-    year, month, punches = _load_month_data(context, period=period)
+    year, month, punches = _load_month_data(context, year=year, month=month)
+    if targets is not None:
+        target_ids = {user_id for user_id, _ in targets}
+        punches = [p for p in punches if p.user_id in target_ids]
     image_files = build_month_report_images(punches, str(tz), year, month)
 
     for user_name, image_file in image_files:
         caption = f"Tabela de ponto {month:02d}/{year} - {user_name}"
-        if period == "current":
-            caption += " (mes atual - parcial)"
         if manual:
             caption += " (gerada manualmente)"
         with image_file.open("rb") as f:
@@ -750,32 +812,30 @@ async def mes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _ensure_allowed_chat_or_reply(update, context.bot_data["target_chat_id"]):
         return
 
-    await _generate_and_send_month_report(context, manual=True)
-
-
-async def mes_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _ensure_allowed_chat_or_reply(update, context.bot_data["target_chat_id"]):
+    assert update.effective_message
+    year, month, targets, err = _parse_report_request(update, context)
+    if err:
+        await update.effective_message.reply_text(err)
         return
-
-    await _generate_and_send_month_report(context, manual=True, period="current")
+    await _generate_and_send_month_report(context, year=year, month=month, targets=targets, manual=True)
 
 
 async def mes_png(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _ensure_allowed_chat_or_reply(update, context.bot_data["target_chat_id"]):
         return
 
-    await _generate_and_send_month_report_images(context, manual=True)
-
-
-async def mes_png_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _ensure_allowed_chat_or_reply(update, context.bot_data["target_chat_id"]):
+    assert update.effective_message
+    year, month, targets, err = _parse_report_request(update, context)
+    if err:
+        await update.effective_message.reply_text(err)
         return
-
-    await _generate_and_send_month_report_images(context, manual=True, period="current")
+    await _generate_and_send_month_report_images(context, year=year, month=month, targets=targets, manual=True)
 
 
 async def scheduled_monthly_report(context: CallbackContext) -> None:
-    await _generate_and_send_month_report(context, manual=False)
+    tz: ZoneInfo = context.bot_data["tz"]
+    year, month = _previous_month(datetime.now(tz))
+    await _generate_and_send_month_report(context, year=year, month=month, manual=False)
 
 
 async def scheduled_pending_alert(context: CallbackContext) -> None:
@@ -834,9 +894,7 @@ def main() -> None:
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("corrigir", corrigir))
     app.add_handler(CommandHandler("mes", mes))
-    app.add_handler(CommandHandler("mes_atual", mes_atual))
     app.add_handler(CommandHandler("mes_png", mes_png))
-    app.add_handler(CommandHandler("mes_png_atual", mes_png_atual))
     app.add_handler(CommandHandler("chat_id", chat_id))
     app.add_error_handler(on_error)
 

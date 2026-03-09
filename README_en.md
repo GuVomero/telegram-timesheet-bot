@@ -20,10 +20,8 @@ Telegram bot to track work punches (`entrada`, `almoco`, `entrada_2`, and `saida
   - `/corrigir <h1> <h2> <h3> <h4> [users]` (block correction for today)
   - `/corrigir <date> <type> <HH:MM> [users]` (manual correction for another day)
   - `/corrigir <date> <h1> <h2> <h3> <h4> [users]` (block correction for another day)
-  - `/mes` (generate previous month spreadsheet on demand)
-  - `/mes_atual` (generate current month partial spreadsheet)
-  - `/mes_png` (generate previous month PNG table, one per user)
-  - `/mes_png_atual` (generate current month PNG table, one per user)
+  - `/mes [month|date] [users]` (generate spreadsheet for requested month; default: current month)
+  - `/mes_png [month|date] [users]` (generate per-user PNG for requested month; default: current month)
   - `/chat_id` (show current group chat ID)
 - Automatic monthly `.xlsx` report generation
 - Automatic alert at 20:00 when there are pending punches
@@ -135,10 +133,14 @@ git status
 - Commands `/entrada`, `/almoco`, `/entrada_2`, `/saida`, `/clear`, and `/corrigir` accept optional user targets by known name in the group (or `me`).
 - The bot validates commands only in `TARGET_CHAT_ID`.
 - Punch records are partitioned by month into separate `.db` files.
-- To generate a manual spreadsheet, use `/mes`.
-- To generate a partial current-month spreadsheet, use `/mes_atual`.
-- To generate per-user table images, use `/mes_png`.
-- To generate partial current-month per-user images, use `/mes_png_atual`.
+- To generate a manual spreadsheet, use `/mes` (default: current month).
+- To generate per-user table images, use `/mes_png` (default: current month).
+- To choose report period, pass month/date in command:
+  - Month: `YYYY-MM` or `MM/YYYY` (example: `/mes 03/2026`)
+  - Date: `YYYY-MM-DD` or `DD/MM/YYYY` (example: `/mes 15/03/2026`)
+- To filter by users, append names after period (or directly after command):
+  - Example: `/mes gustavo caio`
+  - Example: `/mes_png 03/2026 gustavo`
 - To delete punches, use `/clear [YYYY-MM-DD|DD/MM/YYYY] [users]`.
 - Today example: `/clear me coworker`.
 - Specific date example: `/clear 02/03/2026 gustavo caio`.

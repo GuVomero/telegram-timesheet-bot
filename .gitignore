@@ -36,3 +36,6 @@ reports/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local one-off scripts (not versioned)
+local/
