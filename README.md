@@ -74,6 +74,29 @@ make setup
 make run
 ```
 
+## Deploy com systemd
+
+Existe um unit file de exemplo em `deploy/systemd/telegram-timesheet-bot.service`.
+Ele usa placeholders (`<APP_USER>` e `<APP_DIR>`) para evitar expor dados de infraestrutura.
+
+1. Copie e ajuste os placeholders:
+
+```bash
+cp deploy/systemd/telegram-timesheet-bot.service /tmp/telegram-timesheet-bot.service
+sed -i "s|<APP_USER>|seu_usuario|g" /tmp/telegram-timesheet-bot.service
+sed -i "s|<APP_DIR>|/caminho/da/aplicacao|g" /tmp/telegram-timesheet-bot.service
+```
+
+2. Instale e ative no servidor:
+
+```bash
+sudo cp /tmp/telegram-timesheet-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable telegram-timesheet-bot
+sudo systemctl restart telegram-timesheet-bot
+sudo systemctl status telegram-timesheet-bot
+```
+
 ## Como funciona o fechamento mensal
 
 - O bot agenda execução no dia **1 de cada mês às 08:00** (timezone configurada).

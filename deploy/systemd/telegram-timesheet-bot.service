@@ -1,0 +1,18 @@
+[Unit]
+Description=Telegram Timesheet Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<APP_USER>
+Group=<APP_USER>
+WorkingDirectory=<APP_DIR>
+EnvironmentFile=<APP_DIR>/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=<APP_DIR>/venv/bin/python -m src.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
