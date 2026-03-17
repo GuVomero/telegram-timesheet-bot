@@ -21,6 +21,8 @@ REPORT_DIR = Path("reports")
 PNG_DIR = REPORT_DIR / "png"
 INVALID_SHEET_CHARS = set("\\/*?:[]")
 INVALID_FILE_CHARS = set('<>:"/\\|?*')
+WEEKDAY_LABELS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sab", "Dom"]
+DAILY_TARGET = timedelta(hours=8)
 
 
 @dataclass(slots=True)
@@ -31,6 +33,7 @@ class DailySummary:
     return_in: datetime | None
     day_exit: datetime | None
     total_worked: timedelta
+    has_events: bool
     pending: bool
 
 
@@ -40,6 +43,7 @@ class UserMonthlySummary:
     user_name: str
     rows: list[DailySummary]
     month_total: timedelta
+    month_balance: timedelta
 
 
 def _month_range(target_year: int, target_month: int) -> tuple[date, date]:
@@ -135,10 +139,33 @@ def _summarize_day(
         pending = True
     if day_exit is not None and return_in is None:
         pending = True
-    if day_exit is not None and entry is None:
-        pending = True
 
     return total, pending, entry, lunch_out, return_in, day_exit
+
+
+def _format_day_with_weekday(day: date) -> str:
+    return f"{day.strftime('%d/%m/%Y')} ({WEEKDAY_LABELS[day.weekday()]})"
+
+
+def _daily_balance(total_worked: timedelta, has_events: bool) -> tuple[str, str]:
+    if not has_events:
+        return "", "empty"
+
+    diff = total_worked - DAILY_TARGET
+    total_minutes = int(abs(diff.total_seconds()) // 60)
+    hours, minutes = divmod(total_minutes, 60)
+
+    if diff > timedelta():
+        return f"+ {hours:02d}:{minutes:02d}", "positive"
+    if diff < timedelta():
+        return f"-{hours:02d}:{minutes:02d}", "negative"
+    return "00:00", "neutral"
+
+
+def _format_duration_hhmm(total: timedelta) -> str:
+    total_minutes = int(total.total_seconds() // 60)
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{hours:02d}:{minutes:02d}"
 
 
 def _build_user_summaries(
@@ -187,10 +214,14 @@ def _build_user_summaries(
                     return_in=return_in,
                     day_exit=day_exit,
                     total_worked=total,
+                    has_events=bool(events),
                     pending=pending,
                 )
             )
             cursor += timedelta(days=1)
+
+        worked_days = sum(1 for row in rows if row.has_events)
+        month_balance = month_total - (DAILY_TARGET * worked_days)
 
         summaries.append(
             UserMonthlySummary(
@@ -198,6 +229,7 @@ def _build_user_summaries(
                 user_name=user_name,
                 rows=rows,
                 month_total=month_total,
+                month_balance=month_balance,
             )
         )
 
@@ -216,12 +248,13 @@ def build_month_report(
     wb.remove(wb.active)
 
     headers = [
-        "Data",
+        "Data (Dia)",
         "Entrada",
         "Saida Almoco",
         "Entrada 2",
         "Saida Final",
         "Horas Trabalhadas",
+        "Saldo (8h)",
         "Pendente",
     ]
     header_fill = PatternFill("solid", fgColor="1F4E78")
@@ -239,14 +272,16 @@ def build_month_report(
             cell.alignment = center
 
         for row_idx, row in enumerate(summary.rows, start=2):
+            balance_text, balance_kind = _daily_balance(row.total_worked, row.has_events)
             ws.append(
                 [
-                    row.day.isoformat(),
-                    row.entry.strftime("%H:%M:%S") if row.entry else "",
-                    row.lunch_out.strftime("%H:%M:%S") if row.lunch_out else "",
-                    row.return_in.strftime("%H:%M:%S") if row.return_in else "",
-                    row.day_exit.strftime("%H:%M:%S") if row.day_exit else "",
-                    str(row.total_worked),
+                    _format_day_with_weekday(row.day),
+                    row.entry.strftime("%H:%M") if row.entry else "",
+                    row.lunch_out.strftime("%H:%M") if row.lunch_out else "",
+                    row.return_in.strftime("%H:%M") if row.return_in else "",
+                    row.day_exit.strftime("%H:%M") if row.day_exit else "",
+                    _format_duration_hhmm(row.total_worked),
+                    balance_text,
                     "SIM" if row.pending else "",
                 ]
             )
@@ -255,21 +290,35 @@ def build_month_report(
                 cell = ws.cell(row=row_idx, column=col_idx)
                 cell.fill = zebra_fill
                 cell.alignment = center
-            if row.pending:
+            if balance_kind == "positive":
+                ws.cell(row=row_idx, column=7).fill = PatternFill("solid", fgColor="DCFCE7")
+                ws.cell(row=row_idx, column=7).font = Font(color="166534", bold=True)
+            elif balance_kind == "negative":
                 ws.cell(row=row_idx, column=7).fill = PatternFill("solid", fgColor="FECACA")
                 ws.cell(row=row_idx, column=7).font = Font(color="991B1B", bold=True)
+            if row.pending:
+                ws.cell(row=row_idx, column=8).fill = PatternFill("solid", fgColor="FECACA")
+                ws.cell(row=row_idx, column=8).font = Font(color="991B1B", bold=True)
 
         ws.append([])
         total_row = ws.max_row + 1
-        ws.append(["TOTAL MENSAL", "", "", "", "", str(summary.month_total), ""])
+        month_balance_text, month_balance_kind = _daily_balance(summary.month_balance, has_events=True)
+        ws.append(["TOTAL MENSAL", "", "", "", "", _format_duration_hhmm(summary.month_total), month_balance_text, ""])
         ws.cell(row=total_row, column=1).font = Font(bold=True)
         ws.cell(row=total_row, column=6).font = Font(bold=True)
+        ws.cell(row=total_row, column=7).font = Font(bold=True)
         ws.cell(row=total_row, column=1).fill = PatternFill("solid", fgColor="E2E8F0")
         ws.cell(row=total_row, column=6).fill = PatternFill("solid", fgColor="E2E8F0")
+        ws.cell(row=total_row, column=7).fill = PatternFill("solid", fgColor="E2E8F0")
         ws.cell(row=total_row, column=1).alignment = center
         ws.cell(row=total_row, column=6).alignment = center
+        ws.cell(row=total_row, column=7).alignment = center
+        if month_balance_kind == "positive":
+            ws.cell(row=total_row, column=7).font = Font(color="166534", bold=True)
+        elif month_balance_kind == "negative":
+            ws.cell(row=total_row, column=7).font = Font(color="991B1B", bold=True)
 
-        widths = [12, 11, 13, 11, 12, 18, 10]
+        widths = [18, 10, 12, 10, 11, 16, 13, 10]
         for col_idx, width in enumerate(widths, start=1):
             ws.column_dimensions[chr(64 + col_idx)].width = width
 
@@ -291,23 +340,34 @@ def _render_user_table_png(summary: UserMonthlySummary, target_year: int, target
     )
     output = PNG_DIR / filename
 
-    headers = ["Data", "Entrada", "Saida Almoco", "Entrada 2", "Saida Final", "Horas Trabalhadas", "Pendente"]
+    headers = [
+        "Data (Dia)",
+        "Entrada",
+        "Saida Almoco",
+        "Entrada 2",
+        "Saida Final",
+        "Horas Trabalhadas",
+        "Saldo (8h)",
+        "Pendente",
+    ]
     rows = [
         [
-            row.day.isoformat(),
-            row.entry.strftime("%H:%M:%S") if row.entry else "",
-            row.lunch_out.strftime("%H:%M:%S") if row.lunch_out else "",
-            row.return_in.strftime("%H:%M:%S") if row.return_in else "",
-            row.day_exit.strftime("%H:%M:%S") if row.day_exit else "",
-            str(row.total_worked),
+            _format_day_with_weekday(row.day),
+            row.entry.strftime("%H:%M") if row.entry else "",
+            row.lunch_out.strftime("%H:%M") if row.lunch_out else "",
+            row.return_in.strftime("%H:%M") if row.return_in else "",
+            row.day_exit.strftime("%H:%M") if row.day_exit else "",
+            _format_duration_hhmm(row.total_worked),
+            _daily_balance(row.total_worked, row.has_events)[0],
             "SIM" if row.pending else "",
         ]
         for row in summary.rows
     ]
-    rows.append(["TOTAL MENSAL", "", "", "", "", str(summary.month_total), ""])
+    month_balance_text, _month_balance_kind = _daily_balance(summary.month_balance, has_events=True)
+    rows.append(["TOTAL MENSAL", "", "", "", "", _format_duration_hhmm(summary.month_total), month_balance_text, ""])
 
     fig_height = max(4.5, len(rows) * 0.35)
-    fig, ax = plt.subplots(figsize=(12.5, fig_height))
+    fig, ax = plt.subplots(figsize=(14.0, fig_height))
     fig.patch.set_facecolor("#F8FAFC")
     ax.set_facecolor("#F8FAFC")
     ax.axis("off")
@@ -318,7 +378,7 @@ def _render_user_table_png(summary: UserMonthlySummary, target_year: int, target
         loc="center",
         cellLoc="center",
         colColours=["#1F4E78"] * len(headers),
-        colWidths=[0.12, 0.1, 0.13, 0.1, 0.11, 0.2, 0.1],
+        colWidths=[0.18, 0.08, 0.1, 0.08, 0.09, 0.15, 0.12, 0.09],
     )
     table.auto_set_font_size(False)
     table.set_fontsize(8.5)
@@ -331,7 +391,14 @@ def _render_user_table_png(summary: UserMonthlySummary, target_year: int, target
         else:
             cell.set_edgecolor("#E5E7EB")
             cell.set_facecolor("#F8FAFC" if r % 2 == 0 else "#FFFFFF")
-            if c == 6 and rows[r - 1][6] == "SIM":
+            if c == 6:
+                if rows[r - 1][6].startswith("+ "):
+                    cell.set_facecolor("#DCFCE7")
+                    cell.set_text_props(color="#166534", weight="bold")
+                elif rows[r - 1][6].startswith("-"):
+                    cell.set_facecolor("#FECACA")
+                    cell.set_text_props(color="#991B1B", weight="bold")
+            if c == 7 and rows[r - 1][7] == "SIM":
                 cell.set_facecolor("#FECACA")
                 cell.set_text_props(color="#991B1B", weight="bold")
 
@@ -339,8 +406,12 @@ def _render_user_table_png(summary: UserMonthlySummary, target_year: int, target
     for c in range(len(headers)):
         cell = table[(total_row, c)]
         cell.set_facecolor("#E2E8F0")
-        if c in {0, 5}:
+        if c in {0, 5, 6}:
             cell.set_text_props(weight="bold")
+    if rows[total_row - 1][6].startswith("+ "):
+        table[(total_row, 6)].set_text_props(color="#166534", weight="bold")
+    elif rows[total_row - 1][6].startswith("-"):
+        table[(total_row, 6)].set_text_props(color="#991B1B", weight="bold")
 
     plt.title(
         f"Ponto {target_month:02d}/{target_year} - {summary.user_name}",
