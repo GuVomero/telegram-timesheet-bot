@@ -225,14 +225,16 @@ def _build_user_summaries(
     tz = ZoneInfo(tz_name)
     month_start, month_end = _month_range(target_year, target_month)
 
-    grouped: dict[tuple[int, str], dict[date, list[Punch]]] = defaultdict(lambda: defaultdict(list))
+    grouped: dict[int, dict[date, list[Punch]]] = defaultdict(lambda: defaultdict(list))
+    latest_name_by_user: dict[int, str] = {}
+    latest_ts_by_user: dict[int, datetime] = {}
 
     for punch in punches:
         local_ts = punch.ts_utc.astimezone(tz)
         local_day = local_ts.date()
         if local_day < month_start or local_day >= month_end:
             continue
-        grouped[(punch.user_id, punch.user_name)][local_day].append(
+        grouped[punch.user_id][local_day].append(
             Punch(
                 id=punch.id,
                 chat_id=punch.chat_id,
@@ -242,10 +244,15 @@ def _build_user_summaries(
                 ts_utc=local_ts,
             )
         )
+        prev_ts = latest_ts_by_user.get(punch.user_id)
+        if prev_ts is None or local_ts >= prev_ts:
+            latest_ts_by_user[punch.user_id] = local_ts
+            latest_name_by_user[punch.user_id] = punch.user_name
 
     summaries: list[UserMonthlySummary] = []
 
-    for (user_id, user_name), days in sorted(grouped.items(), key=lambda item: item[0][1].lower()):
+    for user_id, days in sorted(grouped.items(), key=lambda item: latest_name_by_user.get(item[0], "").lower()):
+        user_name = latest_name_by_user.get(user_id, str(user_id))
         rows: list[DailySummary] = []
         month_total = timedelta()
 
