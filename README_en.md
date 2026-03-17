@@ -18,6 +18,8 @@ Telegram bot to track work punches (`entrada`, `almoco`, `entrada_2`, and `saida
   - `/clear [date] [users]` (deletes punches for today or for a specific date)
   - `/time_base <HH:MM> [users]` (sets daily base for today; global default is 08:00)
   - `/time_base <date> <HH:MM> [users]` (sets base for a specific day)
+  - `/workmode <home|campo> [users]` (sets work mode for today)
+  - `/workmode <date> <home|campo> [users]` (sets work mode for another day)
   - `/corrigir <type> <HH:MM> [users]` (manual correction for today)
   - `/corrigir <h1> <h2> <h3> <h4> [users]` (block correction for today)
   - `/corrigir <date> <type> <HH:MM> [users]` (manual correction for another day)
@@ -135,6 +137,10 @@ git status
 - If someone breaks the sequence (for example, forgets `/saida`), the day is marked as pending in reports.
 - Supported sequences: `entrada -> almoco`, `entrada_2 -> saida`, and `entrada -> almoco -> entrada_2 -> saida`.
 - Commands `/entrada`, `/almoco`, `/entrada_2`, `/saida`, `/clear`, `/time_base`, and `/corrigir` accept optional user targets by known name in the group (or `me`).
+- `/workmode` also accepts optional targets and optional date:
+  - `/workmode home gustavo`
+  - `/workmode 2026-04-21 campo gustavo caio`
+  - Optional reset: `/workmode 2026-04-21 padrao gustavo`
 - The bot validates commands only in `TARGET_CHAT_ID`.
 - Punch records are partitioned by month into separate `.db` files.
 - To generate a manual spreadsheet, use `/mes` (default: current month).

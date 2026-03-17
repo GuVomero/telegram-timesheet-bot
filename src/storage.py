@@ -38,6 +38,15 @@ class DailyTarget:
     target: timedelta
 
 
+@dataclass(slots=True)
+class WorkMode:
+    chat_id: int
+    user_id: int
+    user_name: str
+    target_day: date
+    mode: str
+
+
 def _ensure_db_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -133,6 +142,25 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_daily_targets_chat_day
         ON daily_targets (chat_id, target_day)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS work_modes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_name TEXT NOT NULL,
+            target_day TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            UNIQUE(chat_id, user_id, target_day)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_work_modes_chat_day
+        ON work_modes (chat_id, target_day)
         """
     )
 
@@ -455,6 +483,90 @@ def list_daily_targets_for_month(
                 user_name=row["user_name"],
                 target_day=date.fromisoformat(row["target_day"]),
                 target=timedelta(minutes=int(row["target_minutes"])),
+            )
+        )
+    return out
+
+
+def set_work_mode(
+    chat_id: int,
+    user_id: int,
+    user_name: str,
+    target_day: date,
+    mode: str,
+) -> None:
+    db_path = _db_path_for_year_month(target_day.year, target_day.month)
+    normalized_mode = mode.strip().upper()
+
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        if normalized_mode == "STANDARD":
+            conn.execute(
+                """
+                DELETE FROM work_modes
+                WHERE chat_id = ?
+                  AND user_id = ?
+                  AND target_day = ?
+                """,
+                (chat_id, user_id, target_day.isoformat()),
+            )
+            return
+
+        conn.execute(
+            """
+            INSERT INTO work_modes (chat_id, user_id, user_name, target_day, mode)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, user_id, target_day) DO UPDATE SET
+                user_name = excluded.user_name,
+                mode = excluded.mode
+            """,
+            (chat_id, user_id, user_name, target_day.isoformat(), normalized_mode),
+        )
+
+
+def list_work_modes_for_month(
+    chat_id: int,
+    year: int,
+    month: int,
+    user_ids: set[int] | None = None,
+) -> list[WorkMode]:
+    db_path = _db_path_for_year_month(year, month)
+    if not db_path.exists():
+        return []
+
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        if user_ids:
+            placeholders = ", ".join("?" for _ in user_ids)
+            params: list[object] = [chat_id, *sorted(user_ids)]
+            rows = conn.execute(
+                f"""
+                SELECT chat_id, user_id, user_name, target_day, mode
+                FROM work_modes
+                WHERE chat_id = ?
+                  AND user_id IN ({placeholders})
+                """,
+                params,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT chat_id, user_id, user_name, target_day, mode
+                FROM work_modes
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchall()
+
+    out: list[WorkMode] = []
+    for row in rows:
+        out.append(
+            WorkMode(
+                chat_id=row["chat_id"],
+                user_id=row["user_id"],
+                user_name=row["user_name"],
+                target_day=date.fromisoformat(row["target_day"]),
+                mode=row["mode"],
             )
         )
     return out

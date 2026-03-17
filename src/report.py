@@ -23,6 +23,18 @@ INVALID_SHEET_CHARS = set("\\/*?:[]")
 INVALID_FILE_CHARS = set('<>:"/\\|?*')
 WEEKDAY_LABELS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sab", "Dom"]
 DEFAULT_DAILY_TARGET = timedelta(hours=8)
+WORK_MODE_STANDARD = "STANDARD"
+WORK_MODE_HOME = "HOME"
+WORK_MODE_FIELD = "CAMPO"
+WORK_MODE_LABELS = {
+    WORK_MODE_STANDARD: "",
+    WORK_MODE_HOME: "Home Office",
+    WORK_MODE_FIELD: "Campo",
+}
+WORK_MODE_COLORS = {
+    WORK_MODE_HOME: ("DBEAFE", "1E3A8A"),
+    WORK_MODE_FIELD: ("FEF3C7", "92400E"),
+}
 
 
 @dataclass(slots=True)
@@ -34,6 +46,7 @@ class DailySummary:
     day_exit: datetime | None
     total_worked: timedelta
     target: timedelta
+    work_mode: str
     has_events: bool
     pending: bool
 
@@ -187,6 +200,19 @@ def _resolve_daily_target(
     return user_overrides.get(day, default_daily_target)
 
 
+def _resolve_work_mode(
+    user_id: int,
+    day: date,
+    work_modes_by_user: dict[int, dict[date, str]] | None,
+) -> str:
+    if work_modes_by_user is None:
+        return WORK_MODE_STANDARD
+    user_modes = work_modes_by_user.get(user_id)
+    if user_modes is None:
+        return WORK_MODE_STANDARD
+    return user_modes.get(day, WORK_MODE_STANDARD)
+
+
 def _build_user_summaries(
     punches: list[Punch],
     tz_name: str,
@@ -194,6 +220,7 @@ def _build_user_summaries(
     target_month: int,
     default_daily_target: timedelta = DEFAULT_DAILY_TARGET,
     daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None = None,
+    work_modes_by_user: dict[int, dict[date, str]] | None = None,
 ) -> list[UserMonthlySummary]:
     tz = ZoneInfo(tz_name)
     month_start, month_end = _month_range(target_year, target_month)
@@ -231,6 +258,7 @@ def _build_user_summaries(
                 default_daily_target,
                 daily_target_overrides_by_user,
             )
+            work_mode = _resolve_work_mode(user_id, cursor, work_modes_by_user)
             total, pending, entry, lunch_out, return_in, day_exit = _summarize_day(events)
             month_total += total
             rows.append(
@@ -242,6 +270,7 @@ def _build_user_summaries(
                     day_exit=day_exit,
                     total_worked=total,
                     target=daily_target,
+                    work_mode=work_mode,
                     has_events=bool(events),
                     pending=pending,
                 )
@@ -271,6 +300,7 @@ def build_month_report(
     target_month: int,
     default_daily_target: timedelta = DEFAULT_DAILY_TARGET,
     daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None = None,
+    work_modes_by_user: dict[int, dict[date, str]] | None = None,
 ) -> Path:
     summaries = _build_user_summaries(
         punches,
@@ -279,6 +309,7 @@ def build_month_report(
         target_month,
         default_daily_target=default_daily_target,
         daily_target_overrides_by_user=daily_target_overrides_by_user,
+        work_modes_by_user=work_modes_by_user,
     )
 
     wb = Workbook()
@@ -292,6 +323,7 @@ def build_month_report(
         "Saida Final",
         "Horas Trabalhadas",
         "Saldo (8h)",
+        "Modo",
         "Pendente",
     ]
     header_fill = PatternFill("solid", fgColor="1F4E78")
@@ -319,6 +351,7 @@ def build_month_report(
                     row.day_exit.strftime("%H:%M") if row.day_exit else "",
                     _format_duration_hhmm(row.total_worked),
                     balance_text,
+                    WORK_MODE_LABELS.get(row.work_mode, ""),
                     "SIM" if row.pending else "",
                 ]
             )
@@ -333,14 +366,18 @@ def build_month_report(
             elif balance_kind == "negative":
                 ws.cell(row=row_idx, column=7).fill = PatternFill("solid", fgColor="FECACA")
                 ws.cell(row=row_idx, column=7).font = Font(color="991B1B", bold=True)
+            if row.work_mode in WORK_MODE_COLORS:
+                fill_color, font_color = WORK_MODE_COLORS[row.work_mode]
+                ws.cell(row=row_idx, column=8).fill = PatternFill("solid", fgColor=fill_color)
+                ws.cell(row=row_idx, column=8).font = Font(color=font_color, bold=True)
             if row.pending:
-                ws.cell(row=row_idx, column=8).fill = PatternFill("solid", fgColor="FECACA")
-                ws.cell(row=row_idx, column=8).font = Font(color="991B1B", bold=True)
+                ws.cell(row=row_idx, column=9).fill = PatternFill("solid", fgColor="FECACA")
+                ws.cell(row=row_idx, column=9).font = Font(color="991B1B", bold=True)
 
         ws.append([])
         total_row = ws.max_row + 1
         month_balance_text, month_balance_kind = _format_signed_duration_hhmm(summary.month_balance)
-        ws.append(["TOTAL MENSAL", "", "", "", "", _format_duration_hhmm(summary.month_total), month_balance_text, ""])
+        ws.append(["TOTAL MENSAL", "", "", "", "", _format_duration_hhmm(summary.month_total), month_balance_text, "", ""])
         ws.cell(row=total_row, column=1).font = Font(bold=True)
         ws.cell(row=total_row, column=6).font = Font(bold=True)
         ws.cell(row=total_row, column=7).font = Font(bold=True)
@@ -355,7 +392,18 @@ def build_month_report(
         elif month_balance_kind == "negative":
             ws.cell(row=total_row, column=7).font = Font(color="991B1B", bold=True)
 
-        widths = [18, 10, 12, 10, 11, 16, 13, 10]
+        ws.append([])
+        ws.append(["LEGENDA", "", "", "", "", "", "", "", ""])
+        legend_header_row = ws.max_row
+        ws.cell(row=legend_header_row, column=1).font = Font(bold=True)
+        ws.append(["HOME", "Home Office", "", "", "", "", "", "", ""])
+        ws.append(["CAMPO", "Campo", "", "", "", "", "", "", ""])
+        ws.cell(row=legend_header_row + 1, column=1).fill = PatternFill("solid", fgColor=WORK_MODE_COLORS[WORK_MODE_HOME][0])
+        ws.cell(row=legend_header_row + 1, column=1).font = Font(color=WORK_MODE_COLORS[WORK_MODE_HOME][1], bold=True)
+        ws.cell(row=legend_header_row + 2, column=1).fill = PatternFill("solid", fgColor=WORK_MODE_COLORS[WORK_MODE_FIELD][0])
+        ws.cell(row=legend_header_row + 2, column=1).font = Font(color=WORK_MODE_COLORS[WORK_MODE_FIELD][1], bold=True)
+
+        widths = [18, 10, 12, 10, 11, 16, 13, 14, 10]
         for col_idx, width in enumerate(widths, start=1):
             ws.column_dimensions[chr(64 + col_idx)].width = width
 
@@ -385,6 +433,7 @@ def _render_user_table_png(summary: UserMonthlySummary, target_year: int, target
         "Saida Final",
         "Horas Trabalhadas",
         "Saldo (8h)",
+        "Modo",
         "Pendente",
     ]
     rows = [
@@ -396,15 +445,16 @@ def _render_user_table_png(summary: UserMonthlySummary, target_year: int, target
             row.day_exit.strftime("%H:%M") if row.day_exit else "",
             _format_duration_hhmm(row.total_worked),
             _daily_balance(row.total_worked, row.has_events, row.target)[0],
+            WORK_MODE_LABELS.get(row.work_mode, ""),
             "SIM" if row.pending else "",
         ]
         for row in summary.rows
     ]
     month_balance_text, _month_balance_kind = _format_signed_duration_hhmm(summary.month_balance)
-    rows.append(["TOTAL MENSAL", "", "", "", "", _format_duration_hhmm(summary.month_total), month_balance_text, ""])
+    rows.append(["TOTAL MENSAL", "", "", "", "", _format_duration_hhmm(summary.month_total), month_balance_text, "", ""])
 
     fig_height = max(4.5, len(rows) * 0.35)
-    fig, ax = plt.subplots(figsize=(14.0, fig_height))
+    fig, ax = plt.subplots(figsize=(15.5, fig_height))
     fig.patch.set_facecolor("#F8FAFC")
     ax.set_facecolor("#F8FAFC")
     ax.axis("off")
@@ -415,7 +465,7 @@ def _render_user_table_png(summary: UserMonthlySummary, target_year: int, target
         loc="center",
         cellLoc="center",
         colColours=["#1F4E78"] * len(headers),
-        colWidths=[0.18, 0.08, 0.1, 0.08, 0.09, 0.15, 0.12, 0.09],
+        colWidths=[0.17, 0.08, 0.1, 0.08, 0.09, 0.14, 0.11, 0.12, 0.08],
     )
     table.auto_set_font_size(False)
     table.set_fontsize(8.5)
@@ -435,9 +485,16 @@ def _render_user_table_png(summary: UserMonthlySummary, target_year: int, target
                 elif rows[r - 1][6].startswith("-"):
                     cell.set_facecolor("#FECACA")
                     cell.set_text_props(color="#991B1B", weight="bold")
-            if c == 7 and rows[r - 1][7] == "SIM":
+            if c == 8 and rows[r - 1][8] == "SIM":
                 cell.set_facecolor("#FECACA")
                 cell.set_text_props(color="#991B1B", weight="bold")
+            if c == 7:
+                if rows[r - 1][7] == "Home Office":
+                    cell.set_facecolor("#DBEAFE")
+                    cell.set_text_props(color="#1E3A8A", weight="bold")
+                elif rows[r - 1][7] == "Campo":
+                    cell.set_facecolor("#FEF3C7")
+                    cell.set_text_props(color="#92400E", weight="bold")
 
     total_row = len(rows)
     for c in range(len(headers)):
@@ -463,7 +520,25 @@ def _render_user_table_png(summary: UserMonthlySummary, target_year: int, target
         y=0.97,
         color="#475569",
     )
-    plt.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.text(
+        0.02,
+        0.02,
+        "HOME",
+        fontsize=8,
+        color="#1E3A8A",
+        bbox={"facecolor": "#DBEAFE", "edgecolor": "#93C5FD", "boxstyle": "round,pad=0.25"},
+    )
+    fig.text(0.10, 0.02, "Home Office", fontsize=8, color="#334155")
+    fig.text(
+        0.26,
+        0.02,
+        "CAMPO",
+        fontsize=8,
+        color="#92400E",
+        bbox={"facecolor": "#FEF3C7", "edgecolor": "#FDE68A", "boxstyle": "round,pad=0.25"},
+    )
+    fig.text(0.36, 0.02, "Campo", fontsize=8, color="#334155")
+    plt.tight_layout(rect=(0, 0.04, 1, 0.95))
     fig.savefig(output, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
@@ -477,6 +552,7 @@ def build_month_report_images(
     target_month: int,
     default_daily_target: timedelta = DEFAULT_DAILY_TARGET,
     daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None = None,
+    work_modes_by_user: dict[int, dict[date, str]] | None = None,
 ) -> list[tuple[str, Path]]:
     summaries = _build_user_summaries(
         punches,
@@ -485,6 +561,7 @@ def build_month_report_images(
         target_month,
         default_daily_target=default_daily_target,
         daily_target_overrides_by_user=daily_target_overrides_by_user,
+        work_modes_by_user=work_modes_by_user,
     )
 
     outputs: list[tuple[str, Path]] = []

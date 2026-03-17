@@ -18,6 +18,8 @@ Bot de Telegram para registrar ponto (`entrada`, `almoco`, `entrada_2` e `saida`
   - `/clear [data] [usuarios]` (apaga registros do dia atual ou da data informada)
   - `/time_base <HH:MM> [usuarios]` (define base de horas para hoje; padrão global 08:00)
   - `/time_base <data> <HH:MM> [usuarios]` (define base para uma data específica)
+  - `/workmode <home|campo> [usuarios]` (define modo de trabalho para hoje)
+  - `/workmode <data> <home|campo> [usuarios]` (define modo de trabalho em outra data)
   - `/corrigir <tipo> <HH:MM> [usuarios]` (adiciona correção manual de hoje)
   - `/corrigir <h1> <h2> <h3> <h4> [usuarios]` (correção em bloco de hoje)
   - `/corrigir <data> <tipo> <HH:MM> [usuarios]` (adiciona correção manual em outro dia)
@@ -138,6 +140,10 @@ git status
 - Comando `/time_base` aceita alvos opcionais e data opcional:
   - `/time_base 08:00 gustavo`
   - `/time_base 2026-04-21 00:00 gustavo caio`
+- Comando `/workmode` aceita alvos opcionais e data opcional:
+  - `/workmode home gustavo`
+  - `/workmode 2026-04-21 campo gustavo caio`
+  - Opcional para voltar ao normal: `/workmode 2026-04-21 padrao gustavo`
 - O bot valida comandos apenas no `TARGET_CHAT_ID`.
 - Os registros agora ficam particionados por mês em arquivos `.db` separados.
 - Para produzir planilha manualmente, use `/mes` (padrão: mês atual).

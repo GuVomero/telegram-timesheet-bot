@@ -21,7 +21,9 @@ from .storage import (
     list_daily_targets_for_month,
     list_known_users,
     list_punches_between,
+    list_work_modes_for_month,
     set_daily_target,
+    set_work_mode,
 )
 
 
@@ -49,6 +51,13 @@ MANUAL_ACTIONS = {
 }
 FIXED_USERS_ENV = "FIXED_USERS"
 TIME_TOKEN_RE = re.compile(r"^\d{1,2}:\d{2}$")
+WORK_MODE_TOKENS = {
+    "home": "HOME",
+    "homeoffice": "HOME",
+    "campo": "CAMPO",
+    "padrao": "STANDARD",
+    "default": "STANDARD",
+}
 CORRECTION_ORDER: list[tuple[str, str]] = [
     ("ENTRY", "entrada"),
     ("LUNCH_OUT", "almoco"),
@@ -123,6 +132,20 @@ def _load_daily_target_overrides_by_user(
     return dict(out)
 
 
+def _load_work_modes_by_user(
+    chat_id: int,
+    year: int,
+    month: int,
+    targets: list[tuple[int, str]] | None = None,
+) -> dict[int, dict[date, str]]:
+    target_ids = {user_id for user_id, _ in targets} if targets is not None else None
+    rows = list_work_modes_for_month(chat_id, year, month, user_ids=target_ids)
+    out: dict[int, dict[date, str]] = defaultdict(dict)
+    for row in rows:
+        out[row.user_id][row.target_day] = row.mode
+    return dict(out)
+
+
 def _display_name(update: Update) -> str:
     user = update.effective_user
     if user is None:
@@ -159,7 +182,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.effective_message.reply_text(
-        "Comandos: /entrada, /almoco, /entrada_2, /saida, /status, /clear, /time_base, /corrigir, /mes, /mes_png, /chat_id\n"
+        "Comandos: /entrada, /almoco, /entrada_2, /saida, /status, /clear, /time_base, /workmode, /corrigir, /mes, /mes_png, /chat_id\n"
         "Use /entrada, /almoco, /entrada_2 e /saida para montar a jornada."
     )
 
@@ -189,6 +212,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/time_base <HH:MM> [usuarios] - define base para hoje\n"
         "/time_base <data> <HH:MM> [usuarios] - define base para outra data\n"
         "Exemplo feriado: /time_base 2026-04-21 00:00\n\n"
+        "[Modo de trabalho]\n"
+        "/workmode <home|campo> [usuarios] - define modo de hoje\n"
+        "/workmode <data> <home|campo> [usuarios] - define modo para outra data\n"
+        "Opcional: use /workmode <...> padrao para voltar ao modo normal.\n\n"
         "[Relatorios]\n"
         "/mes [mes|data] [usuarios] - XLSX (padrao: mes atual)\n"
         "/mes_png [mes|data] [usuarios] - PNG por usuario (padrao: mes atual)\n"
@@ -381,6 +408,64 @@ async def time_base(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for target_id, target_name in targets:
         set_daily_target(chat.id, target_id, target_name, target_day, target)
         lines.append(f"OK {target_name}: time_base de {target_day:%d/%m/%Y} definido para {target_text}.")
+
+    await msg.reply_text("\n".join(lines))
+
+
+async def workmode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _ensure_allowed_chat_or_reply(update, context.bot_data["target_chat_id"]):
+        return
+
+    chat = update.effective_chat
+    sender = update.effective_user
+    msg = update.effective_message
+    assert chat and sender and msg
+
+    if not context.args:
+        await msg.reply_text(
+            "Uso: /workmode <home|campo> [usuarios]\n"
+            "ou: /workmode <data> <home|campo> [usuarios]\n"
+            "Exemplo: /workmode 2026-04-21 campo gustavo"
+        )
+        return
+
+    tz: ZoneInfo = context.bot_data["tz"]
+    target_day = datetime.now(tz).date()
+    payload = context.args
+
+    parsed_day = _parse_date_input(context.args[0].strip())
+    if parsed_day is not None:
+        target_day = parsed_day
+        payload = context.args[1:]
+
+    if not payload:
+        await msg.reply_text("Informe um modo: home ou campo.")
+        return
+
+    mode_token = _normalize_text(payload[0]).replace(" ", "")
+    mode = WORK_MODE_TOKENS.get(mode_token)
+    if mode is None:
+        await msg.reply_text("Modo invalido. Use: home ou campo.")
+        return
+
+    user_args = payload[1:]
+    sender_name = _display_name(update)
+    targets, err = _resolve_target_users(
+        chat.id,
+        sender.id,
+        sender_name,
+        user_args,
+        context.bot_data.get("fixed_users"),
+    )
+    if err:
+        await msg.reply_text(err)
+        return
+
+    mode_label = "padrao" if mode == "STANDARD" else "home office" if mode == "HOME" else "campo"
+    lines: list[str] = []
+    for target_id, target_name in targets:
+        set_work_mode(chat.id, target_id, target_name, target_day, mode)
+        lines.append(f"OK {target_name}: modo de {target_day:%d/%m/%Y} definido para {mode_label}.")
 
     await msg.reply_text("\n".join(lines))
 
@@ -859,6 +944,7 @@ async def _generate_and_send_month_report(
     chat_id: int = context.bot_data["target_chat_id"]
     year, month, punches = _load_month_data(context, year=year, month=month)
     overrides_by_user = _load_daily_target_overrides_by_user(chat_id, year, month, targets=targets)
+    work_modes_by_user = _load_work_modes_by_user(chat_id, year, month, targets=targets)
     if targets is not None:
         target_ids = {user_id for user_id, _ in targets}
         punches = [p for p in punches if p.user_id in target_ids]
@@ -868,6 +954,7 @@ async def _generate_and_send_month_report(
         year,
         month,
         daily_target_overrides_by_user=overrides_by_user,
+        work_modes_by_user=work_modes_by_user,
     )
 
     caption = f"Planilha de ponto {month:02d}/{year}"
@@ -892,6 +979,7 @@ async def _generate_and_send_month_report_images(
     chat_id: int = context.bot_data["target_chat_id"]
     year, month, punches = _load_month_data(context, year=year, month=month)
     overrides_by_user = _load_daily_target_overrides_by_user(chat_id, year, month, targets=targets)
+    work_modes_by_user = _load_work_modes_by_user(chat_id, year, month, targets=targets)
     if targets is not None:
         target_ids = {user_id for user_id, _ in targets}
         punches = [p for p in punches if p.user_id in target_ids]
@@ -901,6 +989,7 @@ async def _generate_and_send_month_report_images(
         year,
         month,
         daily_target_overrides_by_user=overrides_by_user,
+        work_modes_by_user=work_modes_by_user,
     )
 
     for user_name, image_file in image_files:
@@ -996,6 +1085,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("time_base", time_base))
+    app.add_handler(CommandHandler("workmode", workmode))
     app.add_handler(CommandHandler("corrigir", corrigir))
     app.add_handler(CommandHandler("mes", mes))
     app.add_handler(CommandHandler("mes_png", mes_png))
