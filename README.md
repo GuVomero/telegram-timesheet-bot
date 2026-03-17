@@ -16,6 +16,8 @@ Bot de Telegram para registrar ponto (`entrada`, `almoco`, `entrada_2` e `saida`
   - `/saida`
   - `/status` (último registro do usuário)
   - `/clear [data] [usuarios]` (apaga registros do dia atual ou da data informada)
+  - `/time_base <HH:MM> [usuarios]` (define base de horas para hoje; padrão global 08:00)
+  - `/time_base <data> <HH:MM> [usuarios]` (define base para uma data específica)
   - `/corrigir <tipo> <HH:MM> [usuarios]` (adiciona correção manual de hoje)
   - `/corrigir <h1> <h2> <h3> <h4> [usuarios]` (correção em bloco de hoje)
   - `/corrigir <data> <tipo> <HH:MM> [usuarios]` (adiciona correção manual em outro dia)
@@ -55,6 +57,8 @@ TIMEZONE=America/Sao_Paulo
 
 Se quiser travar o bot para aliases fixos (recomendado no seu caso), configure `FIXED_USERS`.
 Assim comandos com argumentos como `eu` e `colega` sempre resolvem para os mesmos IDs.
+Para dias especiais (feriado, banco de horas etc.), use `/time_base`.
+Exemplo: em `2026-04-21`, com `00:00`, toda hora trabalhada vira extra no saldo.
 
 ## Rodando local
 
@@ -131,6 +135,9 @@ git status
 - Se alguém quebrar a sequência (ex.: esquecer `/saida`), o dia fica com pendência na planilha.
 - Sequencias adotadas: `entrada -> almoco`, `entrada_2 -> saida` e `entrada -> almoco -> entrada_2 -> saida`.
 - Comandos `/entrada`, `/almoco`, `/entrada_2`, `/saida`, `/clear` e `/corrigir` aceitam alvos opcionais por nome conhecido no grupo (ou `eu`).
+- Comando `/time_base` aceita alvos opcionais e data opcional:
+  - `/time_base 08:00 gustavo`
+  - `/time_base 2026-04-21 00:00 gustavo caio`
 - O bot valida comandos apenas no `TARGET_CHAT_ID`.
 - Os registros agora ficam particionados por mês em arquivos `.db` separados.
 - Para produzir planilha manualmente, use `/mes` (padrão: mês atual).

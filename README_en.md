@@ -16,6 +16,8 @@ Telegram bot to track work punches (`entrada`, `almoco`, `entrada_2`, and `saida
   - `/saida`
   - `/status` (your latest punch)
   - `/clear [date] [users]` (deletes punches for today or for a specific date)
+  - `/time_base <HH:MM> [users]` (sets daily base for today; global default is 08:00)
+  - `/time_base <date> <HH:MM> [users]` (sets base for a specific day)
   - `/corrigir <type> <HH:MM> [users]` (manual correction for today)
   - `/corrigir <h1> <h2> <h3> <h4> [users]` (block correction for today)
   - `/corrigir <date> <type> <HH:MM> [users]` (manual correction for another day)
@@ -55,6 +57,8 @@ TIMEZONE=America/Sao_Paulo
 
 If you want strict alias mapping (recommended), configure `FIXED_USERS`.
 Then command arguments such as `me` and `coworker` always resolve to the same user IDs.
+For special days (holiday, comp time, etc.), use `/time_base`.
+Example: setting `00:00` on `2026-04-21` makes all worked time count as extra for that day.
 
 ## Running Locally
 
@@ -130,7 +134,7 @@ git status
 
 - If someone breaks the sequence (for example, forgets `/saida`), the day is marked as pending in reports.
 - Supported sequences: `entrada -> almoco`, `entrada_2 -> saida`, and `entrada -> almoco -> entrada_2 -> saida`.
-- Commands `/entrada`, `/almoco`, `/entrada_2`, `/saida`, `/clear`, and `/corrigir` accept optional user targets by known name in the group (or `me`).
+- Commands `/entrada`, `/almoco`, `/entrada_2`, `/saida`, `/clear`, `/time_base`, and `/corrigir` accept optional user targets by known name in the group (or `me`).
 - The bot validates commands only in `TARGET_CHAT_ID`.
 - Punch records are partitioned by month into separate `.db` files.
 - To generate a manual spreadsheet, use `/mes` (default: current month).

@@ -22,7 +22,7 @@ PNG_DIR = REPORT_DIR / "png"
 INVALID_SHEET_CHARS = set("\\/*?:[]")
 INVALID_FILE_CHARS = set('<>:"/\\|?*')
 WEEKDAY_LABELS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sab", "Dom"]
-DAILY_TARGET = timedelta(hours=8)
+DEFAULT_DAILY_TARGET = timedelta(hours=8)
 
 
 @dataclass(slots=True)
@@ -33,6 +33,7 @@ class DailySummary:
     return_in: datetime | None
     day_exit: datetime | None
     total_worked: timedelta
+    target: timedelta
     has_events: bool
     pending: bool
 
@@ -147,11 +148,15 @@ def _format_day_with_weekday(day: date) -> str:
     return f"{day.strftime('%d/%m/%Y')} ({WEEKDAY_LABELS[day.weekday()]})"
 
 
-def _daily_balance(total_worked: timedelta, has_events: bool) -> tuple[str, str]:
+def _daily_balance(total_worked: timedelta, has_events: bool, target: timedelta) -> tuple[str, str]:
     if not has_events:
         return "", "empty"
 
-    diff = total_worked - DAILY_TARGET
+    diff = total_worked - target
+    return _format_signed_duration_hhmm(diff)
+
+
+def _format_signed_duration_hhmm(diff: timedelta) -> tuple[str, str]:
     total_minutes = int(abs(diff.total_seconds()) // 60)
     hours, minutes = divmod(total_minutes, 60)
 
@@ -168,11 +173,27 @@ def _format_duration_hhmm(total: timedelta) -> str:
     return f"{hours:02d}:{minutes:02d}"
 
 
+def _resolve_daily_target(
+    user_id: int,
+    day: date,
+    default_daily_target: timedelta,
+    daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None,
+) -> timedelta:
+    if daily_target_overrides_by_user is None:
+        return default_daily_target
+    user_overrides = daily_target_overrides_by_user.get(user_id)
+    if user_overrides is None:
+        return default_daily_target
+    return user_overrides.get(day, default_daily_target)
+
+
 def _build_user_summaries(
     punches: list[Punch],
     tz_name: str,
     target_year: int,
     target_month: int,
+    default_daily_target: timedelta = DEFAULT_DAILY_TARGET,
+    daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None = None,
 ) -> list[UserMonthlySummary]:
     tz = ZoneInfo(tz_name)
     month_start, month_end = _month_range(target_year, target_month)
@@ -204,6 +225,12 @@ def _build_user_summaries(
         cursor = month_start
         while cursor < month_end:
             events = days.get(cursor, [])
+            daily_target = _resolve_daily_target(
+                user_id,
+                cursor,
+                default_daily_target,
+                daily_target_overrides_by_user,
+            )
             total, pending, entry, lunch_out, return_in, day_exit = _summarize_day(events)
             month_total += total
             rows.append(
@@ -214,14 +241,15 @@ def _build_user_summaries(
                     return_in=return_in,
                     day_exit=day_exit,
                     total_worked=total,
+                    target=daily_target,
                     has_events=bool(events),
                     pending=pending,
                 )
             )
             cursor += timedelta(days=1)
 
-        worked_days = sum(1 for row in rows if row.has_events)
-        month_balance = month_total - (DAILY_TARGET * worked_days)
+        month_target = sum((row.target for row in rows if row.has_events), timedelta())
+        month_balance = month_total - month_target
 
         summaries.append(
             UserMonthlySummary(
@@ -241,8 +269,17 @@ def build_month_report(
     tz_name: str,
     target_year: int,
     target_month: int,
+    default_daily_target: timedelta = DEFAULT_DAILY_TARGET,
+    daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None = None,
 ) -> Path:
-    summaries = _build_user_summaries(punches, tz_name, target_year, target_month)
+    summaries = _build_user_summaries(
+        punches,
+        tz_name,
+        target_year,
+        target_month,
+        default_daily_target=default_daily_target,
+        daily_target_overrides_by_user=daily_target_overrides_by_user,
+    )
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -272,7 +309,7 @@ def build_month_report(
             cell.alignment = center
 
         for row_idx, row in enumerate(summary.rows, start=2):
-            balance_text, balance_kind = _daily_balance(row.total_worked, row.has_events)
+            balance_text, balance_kind = _daily_balance(row.total_worked, row.has_events, row.target)
             ws.append(
                 [
                     _format_day_with_weekday(row.day),
@@ -302,7 +339,7 @@ def build_month_report(
 
         ws.append([])
         total_row = ws.max_row + 1
-        month_balance_text, month_balance_kind = _daily_balance(summary.month_balance, has_events=True)
+        month_balance_text, month_balance_kind = _format_signed_duration_hhmm(summary.month_balance)
         ws.append(["TOTAL MENSAL", "", "", "", "", _format_duration_hhmm(summary.month_total), month_balance_text, ""])
         ws.cell(row=total_row, column=1).font = Font(bold=True)
         ws.cell(row=total_row, column=6).font = Font(bold=True)
@@ -358,12 +395,12 @@ def _render_user_table_png(summary: UserMonthlySummary, target_year: int, target
             row.return_in.strftime("%H:%M") if row.return_in else "",
             row.day_exit.strftime("%H:%M") if row.day_exit else "",
             _format_duration_hhmm(row.total_worked),
-            _daily_balance(row.total_worked, row.has_events)[0],
+            _daily_balance(row.total_worked, row.has_events, row.target)[0],
             "SIM" if row.pending else "",
         ]
         for row in summary.rows
     ]
-    month_balance_text, _month_balance_kind = _daily_balance(summary.month_balance, has_events=True)
+    month_balance_text, _month_balance_kind = _format_signed_duration_hhmm(summary.month_balance)
     rows.append(["TOTAL MENSAL", "", "", "", "", _format_duration_hhmm(summary.month_total), month_balance_text, ""])
 
     fig_height = max(4.5, len(rows) * 0.35)
@@ -438,8 +475,17 @@ def build_month_report_images(
     tz_name: str,
     target_year: int,
     target_month: int,
+    default_daily_target: timedelta = DEFAULT_DAILY_TARGET,
+    daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None = None,
 ) -> list[tuple[str, Path]]:
-    summaries = _build_user_summaries(punches, tz_name, target_year, target_month)
+    summaries = _build_user_summaries(
+        punches,
+        tz_name,
+        target_year,
+        target_month,
+        default_daily_target=default_daily_target,
+        daily_target_overrides_by_user=daily_target_overrides_by_user,
+    )
 
     outputs: list[tuple[str, Path]] = []
     for summary in summaries:

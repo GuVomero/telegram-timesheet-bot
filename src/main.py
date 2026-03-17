@@ -18,8 +18,10 @@ from .storage import (
     delete_punches_between,
     get_last_punch,
     init_db,
+    list_daily_targets_for_month,
     list_known_users,
     list_punches_between,
+    set_daily_target,
 )
 
 
@@ -95,6 +97,32 @@ def _load_fixed_users_from_env() -> dict[str, tuple[int, str]]:
     return out
 
 
+def _parse_hhmm_duration(raw: str) -> timedelta | None:
+    token = raw.strip()
+    if not TIME_TOKEN_RE.fullmatch(token):
+        return None
+    hour_str, minute_str = token.split(":", 1)
+    hour = int(hour_str)
+    minute = int(minute_str)
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return timedelta(hours=hour, minutes=minute)
+
+
+def _load_daily_target_overrides_by_user(
+    chat_id: int,
+    year: int,
+    month: int,
+    targets: list[tuple[int, str]] | None = None,
+) -> dict[int, dict[date, timedelta]]:
+    target_ids = {user_id for user_id, _ in targets} if targets is not None else None
+    rows = list_daily_targets_for_month(chat_id, year, month, user_ids=target_ids)
+    out: dict[int, dict[date, timedelta]] = defaultdict(dict)
+    for row in rows:
+        out[row.user_id][row.target_day] = row.target
+    return dict(out)
+
+
 def _display_name(update: Update) -> str:
     user = update.effective_user
     if user is None:
@@ -131,7 +159,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.effective_message.reply_text(
-        "Comandos: /entrada, /almoco, /entrada_2, /saida, /status, /clear, /corrigir, /mes, /mes_png, /chat_id\n"
+        "Comandos: /entrada, /almoco, /entrada_2, /saida, /status, /clear, /time_base, /corrigir, /mes, /mes_png, /chat_id\n"
         "Use /entrada, /almoco, /entrada_2 e /saida para montar a jornada."
     )
 
@@ -157,6 +185,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Ordem do bloco: entrada almoco entrada_2 saida. Use '-' para ignorar.\n\n"
         "[Limpeza]\n"
         "/clear [data] [usuarios] - apaga registros (hoje ou data informada)\n\n"
+        "[Base diaria]\n"
+        "/time_base <HH:MM> [usuarios] - define base para hoje\n"
+        "/time_base <data> <HH:MM> [usuarios] - define base para outra data\n"
+        "Exemplo feriado: /time_base 2026-04-21 00:00\n\n"
         "[Relatorios]\n"
         "/mes [mes|data] [usuarios] - XLSX (padrao: mes atual)\n"
         "/mes_png [mes|data] [usuarios] - PNG por usuario (padrao: mes atual)\n"
@@ -292,6 +324,63 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             lines.append(f"ERRO {target_name}: nenhum registro encontrado em {target_day:%d/%m/%Y}.")
         else:
             lines.append(f"OK {target_name}: registros apagados de {target_day:%d/%m/%Y}: {deleted}.")
+
+    await msg.reply_text("\n".join(lines))
+
+
+async def time_base(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _ensure_allowed_chat_or_reply(update, context.bot_data["target_chat_id"]):
+        return
+
+    chat = update.effective_chat
+    sender = update.effective_user
+    msg = update.effective_message
+    assert chat and sender and msg
+
+    if not context.args:
+        await msg.reply_text(
+            "Uso: /time_base <HH:MM> [usuarios]\n"
+            "ou: /time_base <data> <HH:MM> [usuarios]\n"
+            "Exemplo feriado: /time_base 2026-04-21 00:00 gustavo"
+        )
+        return
+
+    tz: ZoneInfo = context.bot_data["tz"]
+    target_day = datetime.now(tz).date()
+    payload = context.args
+
+    parsed_day = _parse_date_input(context.args[0].strip())
+    if parsed_day is not None:
+        target_day = parsed_day
+        payload = context.args[1:]
+
+    if not payload:
+        await msg.reply_text("Informe a base no formato HH:MM. Ex.: /time_base 08:00")
+        return
+
+    target = _parse_hhmm_duration(payload[0])
+    if target is None:
+        await msg.reply_text("Valor invalido para base. Use formato HH:MM (ex.: 08:00 ou 00:00).")
+        return
+
+    user_args = payload[1:]
+    sender_name = _display_name(update)
+    targets, err = _resolve_target_users(
+        chat.id,
+        sender.id,
+        sender_name,
+        user_args,
+        context.bot_data.get("fixed_users"),
+    )
+    if err:
+        await msg.reply_text(err)
+        return
+
+    target_text = f"{int(target.total_seconds() // 3600):02d}:{int((target.total_seconds() // 60) % 60):02d}"
+    lines: list[str] = []
+    for target_id, target_name in targets:
+        set_daily_target(chat.id, target_id, target_name, target_day, target)
+        lines.append(f"OK {target_name}: time_base de {target_day:%d/%m/%Y} definido para {target_text}.")
 
     await msg.reply_text("\n".join(lines))
 
@@ -769,10 +858,17 @@ async def _generate_and_send_month_report(
     tz: ZoneInfo = context.bot_data["tz"]
     chat_id: int = context.bot_data["target_chat_id"]
     year, month, punches = _load_month_data(context, year=year, month=month)
+    overrides_by_user = _load_daily_target_overrides_by_user(chat_id, year, month, targets=targets)
     if targets is not None:
         target_ids = {user_id for user_id, _ in targets}
         punches = [p for p in punches if p.user_id in target_ids]
-    report_file = build_month_report(punches, str(tz), year, month)
+    report_file = build_month_report(
+        punches,
+        str(tz),
+        year,
+        month,
+        daily_target_overrides_by_user=overrides_by_user,
+    )
 
     caption = f"Planilha de ponto {month:02d}/{year}"
     if targets is not None:
@@ -795,10 +891,17 @@ async def _generate_and_send_month_report_images(
     tz: ZoneInfo = context.bot_data["tz"]
     chat_id: int = context.bot_data["target_chat_id"]
     year, month, punches = _load_month_data(context, year=year, month=month)
+    overrides_by_user = _load_daily_target_overrides_by_user(chat_id, year, month, targets=targets)
     if targets is not None:
         target_ids = {user_id for user_id, _ in targets}
         punches = [p for p in punches if p.user_id in target_ids]
-    image_files = build_month_report_images(punches, str(tz), year, month)
+    image_files = build_month_report_images(
+        punches,
+        str(tz),
+        year,
+        month,
+        daily_target_overrides_by_user=overrides_by_user,
+    )
 
     for user_name, image_file in image_files:
         caption = f"Tabela de ponto {month:02d}/{year} - {user_name}"
@@ -892,6 +995,7 @@ def main() -> None:
     app.add_handler(CommandHandler("saida", saida))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(CommandHandler("time_base", time_base))
     app.add_handler(CommandHandler("corrigir", corrigir))
     app.add_handler(CommandHandler("mes", mes))
     app.add_handler(CommandHandler("mes_png", mes_png))

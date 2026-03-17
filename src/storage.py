@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -29,6 +29,15 @@ class KnownUser:
     user_name: str
 
 
+@dataclass(slots=True)
+class DailyTarget:
+    chat_id: int
+    user_id: int
+    user_name: str
+    target_day: date
+    target: timedelta
+
+
 def _ensure_db_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -49,6 +58,11 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _db_path_for_year_month(year: int, month: int) -> Path:
+    _ensure_db_dir()
+    return DATA_DIR / f"{month:02d}_{year}.db"
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -100,6 +114,25 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_punches_chat_user_ts
         ON punches (chat_id, user_id, ts_utc)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_targets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_name TEXT NOT NULL,
+            target_day TEXT NOT NULL,
+            target_minutes INTEGER NOT NULL,
+            UNIQUE(chat_id, user_id, target_day)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_daily_targets_chat_day
+        ON daily_targets (chat_id, target_day)
         """
     )
 
@@ -351,3 +384,77 @@ def list_known_users(chat_id: int) -> list[KnownUser]:
     users = [KnownUser(user_id=user_id, user_name=user_name) for user_id, user_name in seen.items()]
     users.sort(key=lambda item: item.user_name.lower())
     return users
+
+
+def set_daily_target(
+    chat_id: int,
+    user_id: int,
+    user_name: str,
+    target_day: date,
+    target: timedelta,
+) -> None:
+    db_path = _db_path_for_year_month(target_day.year, target_day.month)
+    minutes = int(target.total_seconds() // 60)
+    if minutes < 0:
+        minutes = 0
+
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO daily_targets (chat_id, user_id, user_name, target_day, target_minutes)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, user_id, target_day) DO UPDATE SET
+                user_name = excluded.user_name,
+                target_minutes = excluded.target_minutes
+            """,
+            (chat_id, user_id, user_name, target_day.isoformat(), minutes),
+        )
+
+
+def list_daily_targets_for_month(
+    chat_id: int,
+    year: int,
+    month: int,
+    user_ids: set[int] | None = None,
+) -> list[DailyTarget]:
+    db_path = _db_path_for_year_month(year, month)
+    if not db_path.exists():
+        return []
+
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        if user_ids:
+            placeholders = ", ".join("?" for _ in user_ids)
+            params: list[object] = [chat_id, *sorted(user_ids)]
+            rows = conn.execute(
+                f"""
+                SELECT chat_id, user_id, user_name, target_day, target_minutes
+                FROM daily_targets
+                WHERE chat_id = ?
+                  AND user_id IN ({placeholders})
+                """,
+                params,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT chat_id, user_id, user_name, target_day, target_minutes
+                FROM daily_targets
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchall()
+
+    out: list[DailyTarget] = []
+    for row in rows:
+        out.append(
+            DailyTarget(
+                chat_id=row["chat_id"],
+                user_id=row["user_id"],
+                user_name=row["user_name"],
+                target_day=date.fromisoformat(row["target_day"]),
+                target=timedelta(minutes=int(row["target_minutes"])),
+            )
+        )
+    return out
