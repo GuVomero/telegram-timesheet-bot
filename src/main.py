@@ -12,12 +12,13 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CallbackContext, CommandHandler, ContextTypes
 
-from .report import build_month_report, build_month_report_images
+from .report import build_month_hours_summary, build_month_report, build_month_report_images
 from .storage import (
     add_punch,
     delete_punches_between,
     get_last_punch,
     init_db,
+    list_daily_targets_between,
     list_daily_targets_for_month,
     list_known_users,
     list_punches_between,
@@ -222,6 +223,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "[Relatorios]\n"
         "/mes [mes|data] [usuarios]\n"
         "/mes_png [mes|data] [usuarios]\n"
+        "/resumo [mes|data] [usuarios]\n"
         "Formato de mes: YYYY-MM ou MM/YYYY.\n\n"
         "[Regras da jornada]\n"
         "- entrada -> almoco\n"
@@ -900,6 +902,58 @@ def _load_month_data(
     return year, month, punches
 
 
+def _load_cumulative_data_until_month_end(
+    context: CallbackContext,
+    year: int,
+    month: int,
+) -> list:
+    tz: ZoneInfo = context.bot_data["tz"]
+    chat_id: int = context.bot_data["target_chat_id"]
+    _start_utc, end_utc = _month_window_utc_from_year_month(tz, year, month)
+    start_utc = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return list(list_punches_between(chat_id, start_utc, end_utc))
+
+
+def _month_start_end_dates(year: int, month: int) -> tuple[date, date]:
+    start = date(year, month, 1)
+    if month == 12:
+        end = date(year + 1, 1, 1)
+    else:
+        end = date(year, month + 1, 1)
+    return start, end
+
+
+def _load_daily_target_overrides_between_by_user(
+    chat_id: int,
+    start_day: date,
+    end_day: date,
+    targets: list[tuple[int, str]] | None = None,
+) -> dict[int, dict[date, timedelta]]:
+    target_ids = {user_id for user_id, _name in targets} if targets else None
+    rows = list_daily_targets_between(chat_id, start_day, end_day, user_ids=target_ids)
+
+    by_user: dict[int, dict[date, timedelta]] = defaultdict(dict)
+    for row in rows:
+        by_user[row.user_id][row.target_day] = row.target
+    return by_user
+
+
+def _format_duration_hhmm(total: timedelta) -> str:
+    total_minutes = int(total.total_seconds() // 60)
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{hours:02d}:{minutes:02d}"
+
+
+def _format_signed_duration_hhmm(diff: timedelta) -> str:
+    total_minutes = int(abs(diff.total_seconds()) // 60)
+    hours, minutes = divmod(total_minutes, 60)
+    if diff > timedelta():
+        return f"+ {hours:02d}:{minutes:02d}"
+    if diff < timedelta():
+        return f"-{hours:02d}:{minutes:02d}"
+    return "00:00"
+
+
 def _parse_report_request(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -945,16 +999,19 @@ async def _generate_and_send_month_report(
     tz: ZoneInfo = context.bot_data["tz"]
     chat_id: int = context.bot_data["target_chat_id"]
     year, month, punches = _load_month_data(context, year=year, month=month)
+    cumulative_punches = _load_cumulative_data_until_month_end(context, year=year, month=month)
     overrides_by_user = _load_daily_target_overrides_by_user(chat_id, year, month, targets=targets)
     work_modes_by_user = _load_work_modes_by_user(chat_id, year, month, targets=targets)
     if targets is not None:
         target_ids = {user_id for user_id, _ in targets}
         punches = [p for p in punches if p.user_id in target_ids]
+        cumulative_punches = [p for p in cumulative_punches if p.user_id in target_ids]
     report_file = build_month_report(
         punches,
         str(tz),
         year,
         month,
+        cumulative_punches=cumulative_punches,
         daily_target_overrides_by_user=overrides_by_user,
         work_modes_by_user=work_modes_by_user,
     )
@@ -980,16 +1037,19 @@ async def _generate_and_send_month_report_images(
     tz: ZoneInfo = context.bot_data["tz"]
     chat_id: int = context.bot_data["target_chat_id"]
     year, month, punches = _load_month_data(context, year=year, month=month)
+    cumulative_punches = _load_cumulative_data_until_month_end(context, year=year, month=month)
     overrides_by_user = _load_daily_target_overrides_by_user(chat_id, year, month, targets=targets)
     work_modes_by_user = _load_work_modes_by_user(chat_id, year, month, targets=targets)
     if targets is not None:
         target_ids = {user_id for user_id, _ in targets}
         punches = [p for p in punches if p.user_id in target_ids]
+        cumulative_punches = [p for p in cumulative_punches if p.user_id in target_ids]
     image_files = build_month_report_images(
         punches,
         str(tz),
         year,
         month,
+        cumulative_punches=cumulative_punches,
         daily_target_overrides_by_user=overrides_by_user,
         work_modes_by_user=work_modes_by_user,
     )
@@ -1024,6 +1084,64 @@ async def mes_png(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(err)
         return
     await _generate_and_send_month_report_images(context, year=year, month=month, targets=targets, manual=True)
+
+
+async def resumo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _ensure_allowed_chat_or_reply(update, context.bot_data["target_chat_id"]):
+        return
+
+    assert update.effective_message and update.effective_user
+    tz: ZoneInfo = context.bot_data["tz"]
+    chat_id: int = context.bot_data["target_chat_id"]
+    year, month, targets, err = _parse_report_request(update, context)
+    if err:
+        await update.effective_message.reply_text(err)
+        return
+
+    if targets is None:
+        sender = update.effective_user
+        sender_name = _display_name(update)
+        targets = [(sender.id, sender_name)]
+
+    _year, _month, month_punches = _load_month_data(context, year=year, month=month)
+    cumulative_punches = _load_cumulative_data_until_month_end(context, year=year, month=month)
+    target_ids = {user_id for user_id, _name in targets}
+    month_punches = [p for p in month_punches if p.user_id in target_ids]
+    cumulative_punches = [p for p in cumulative_punches if p.user_id in target_ids]
+
+    month_overrides = _load_daily_target_overrides_by_user(chat_id, year, month, targets=targets)
+    _month_start, month_end = _month_start_end_dates(year, month)
+    cumulative_overrides = _load_daily_target_overrides_between_by_user(
+        chat_id,
+        start_day=date(1970, 1, 1),
+        end_day=month_end,
+        targets=targets,
+    )
+
+    summaries = build_month_hours_summary(
+        month_punches,
+        str(tz),
+        year,
+        month,
+        cumulative_punches=cumulative_punches,
+        daily_target_overrides_by_user=month_overrides,
+        cumulative_daily_target_overrides_by_user=cumulative_overrides,
+        user_scope=targets,
+    )
+
+    lines = [f"Resumo de horas {month:02d}/{year}:"]
+    for summary in summaries:
+        lines.append(
+            f"- {summary.user_name}: "
+            f"cumprido no mes {_format_duration_hhmm(summary.month_total)} | "
+            f"saldo mensal {_format_signed_duration_hhmm(summary.month_balance)} | "
+            f"saldo acumulado {_format_signed_duration_hhmm(summary.cumulative_balance)}"
+        )
+
+    if not summaries:
+        lines.append("- Sem dados para os usuarios informados.")
+
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 async def scheduled_monthly_report(context: CallbackContext) -> None:
@@ -1091,6 +1209,7 @@ def main() -> None:
     app.add_handler(CommandHandler("corrigir", corrigir))
     app.add_handler(CommandHandler("mes", mes))
     app.add_handler(CommandHandler("mes_png", mes_png))
+    app.add_handler(CommandHandler("resumo", resumo))
     app.add_handler(CommandHandler("chat_id", chat_id))
     app.add_error_handler(on_error)
 

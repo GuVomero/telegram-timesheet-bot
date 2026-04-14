@@ -58,6 +58,16 @@ class UserMonthlySummary:
     rows: list[DailySummary]
     month_total: timedelta
     month_balance: timedelta
+    cumulative_total: timedelta
+
+
+@dataclass(slots=True)
+class UserHoursSummary:
+    user_id: int
+    user_name: str
+    month_total: timedelta
+    month_balance: timedelta
+    cumulative_balance: timedelta
 
 
 def _month_range(target_year: int, target_month: int) -> tuple[date, date]:
@@ -218,16 +228,19 @@ def _build_user_summaries(
     tz_name: str,
     target_year: int,
     target_month: int,
+    cumulative_punches: list[Punch] | None = None,
     default_daily_target: timedelta = DEFAULT_DAILY_TARGET,
     daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None = None,
     work_modes_by_user: dict[int, dict[date, str]] | None = None,
 ) -> list[UserMonthlySummary]:
     tz = ZoneInfo(tz_name)
     month_start, month_end = _month_range(target_year, target_month)
+    cumulative_source = cumulative_punches if cumulative_punches is not None else punches
 
     grouped: dict[int, dict[date, list[Punch]]] = defaultdict(lambda: defaultdict(list))
     latest_name_by_user: dict[int, str] = {}
     latest_ts_by_user: dict[int, datetime] = {}
+    cumulative_grouped: dict[int, dict[date, list[Punch]]] = defaultdict(lambda: defaultdict(list))
 
     for punch in punches:
         local_ts = punch.ts_utc.astimezone(tz)
@@ -248,6 +261,22 @@ def _build_user_summaries(
         if prev_ts is None or local_ts >= prev_ts:
             latest_ts_by_user[punch.user_id] = local_ts
             latest_name_by_user[punch.user_id] = punch.user_name
+
+    for punch in cumulative_source:
+        local_ts = punch.ts_utc.astimezone(tz)
+        local_day = local_ts.date()
+        if local_day >= month_end:
+            continue
+        cumulative_grouped[punch.user_id][local_day].append(
+            Punch(
+                id=punch.id,
+                chat_id=punch.chat_id,
+                user_id=punch.user_id,
+                user_name=punch.user_name,
+                action=punch.action,
+                ts_utc=local_ts,
+            )
+        )
 
     summaries: list[UserMonthlySummary] = []
 
@@ -286,6 +315,12 @@ def _build_user_summaries(
 
         month_target = sum((row.target for row in rows if row.has_events), timedelta())
         month_balance = month_total - month_target
+        cumulative_total = timedelta()
+        for day in sorted(cumulative_grouped.get(user_id, {}).keys()):
+            total, _pending, _entry, _lunch_out, _return_in, _day_exit = _summarize_day(
+                sorted(cumulative_grouped[user_id][day], key=lambda event: event.ts_utc)
+            )
+            cumulative_total += total
 
         summaries.append(
             UserMonthlySummary(
@@ -294,10 +329,138 @@ def _build_user_summaries(
                 rows=rows,
                 month_total=month_total,
                 month_balance=month_balance,
+                cumulative_total=cumulative_total,
             )
         )
 
     return summaries
+
+
+def _compute_total_and_balance_until_day(
+    punches: list[Punch],
+    tz: ZoneInfo,
+    end_day_exclusive: date,
+    default_daily_target: timedelta,
+    daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None,
+) -> dict[int, tuple[timedelta, timedelta, str]]:
+    grouped: dict[int, dict[date, list[Punch]]] = defaultdict(lambda: defaultdict(list))
+    latest_name_by_user: dict[int, str] = {}
+    latest_ts_by_user: dict[int, datetime] = {}
+
+    for punch in punches:
+        local_ts = punch.ts_utc.astimezone(tz)
+        local_day = local_ts.date()
+        if local_day >= end_day_exclusive:
+            continue
+        grouped[punch.user_id][local_day].append(
+            Punch(
+                id=punch.id,
+                chat_id=punch.chat_id,
+                user_id=punch.user_id,
+                user_name=punch.user_name,
+                action=punch.action,
+                ts_utc=local_ts,
+            )
+        )
+        prev_ts = latest_ts_by_user.get(punch.user_id)
+        if prev_ts is None or local_ts >= prev_ts:
+            latest_ts_by_user[punch.user_id] = local_ts
+            latest_name_by_user[punch.user_id] = punch.user_name
+
+    out: dict[int, tuple[timedelta, timedelta, str]] = {}
+    for user_id, days in grouped.items():
+        worked_total = timedelta()
+        target_total = timedelta()
+        for day in sorted(days.keys()):
+            events = sorted(days[day], key=lambda event: event.ts_utc)
+            worked, _pending, _entry, _lunch_out, _return_in, _day_exit = _summarize_day(events)
+            worked_total += worked
+            if events:
+                target_total += _resolve_daily_target(
+                    user_id,
+                    day,
+                    default_daily_target,
+                    daily_target_overrides_by_user,
+                )
+        out[user_id] = (
+            worked_total,
+            worked_total - target_total,
+            latest_name_by_user.get(user_id, str(user_id)),
+        )
+
+    return out
+
+
+def build_month_hours_summary(
+    punches: list[Punch],
+    tz_name: str,
+    target_year: int,
+    target_month: int,
+    cumulative_punches: list[Punch] | None = None,
+    default_daily_target: timedelta = DEFAULT_DAILY_TARGET,
+    daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None = None,
+    cumulative_daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None = None,
+    user_scope: list[tuple[int, str]] | None = None,
+) -> list[UserHoursSummary]:
+    month_summaries = _build_user_summaries(
+        punches,
+        tz_name,
+        target_year,
+        target_month,
+        cumulative_punches=cumulative_punches,
+        default_daily_target=default_daily_target,
+        daily_target_overrides_by_user=daily_target_overrides_by_user,
+    )
+    month_by_user = {summary.user_id: summary for summary in month_summaries}
+
+    tz = ZoneInfo(tz_name)
+    _month_start, month_end = _month_range(target_year, target_month)
+    cumulative_source = cumulative_punches if cumulative_punches is not None else punches
+    cumulative_by_user = _compute_total_and_balance_until_day(
+        cumulative_source,
+        tz,
+        month_end,
+        default_daily_target=default_daily_target,
+        daily_target_overrides_by_user=cumulative_daily_target_overrides_by_user,
+    )
+
+    if user_scope is None:
+        users = sorted(
+            {(summary.user_id, summary.user_name) for summary in month_summaries},
+            key=lambda item: item[1].lower(),
+        )
+    else:
+        users = user_scope
+
+    output: list[UserHoursSummary] = []
+    for user_id, requested_name in users:
+        month_summary = month_by_user.get(user_id)
+        cumulative_tuple = cumulative_by_user.get(user_id)
+
+        if month_summary is not None:
+            user_name = month_summary.user_name
+            month_total = month_summary.month_total
+            month_balance = month_summary.month_balance
+        else:
+            user_name = requested_name
+            month_total = timedelta()
+            month_balance = timedelta()
+
+        cumulative_balance = cumulative_tuple[1] if cumulative_tuple is not None else timedelta()
+        if cumulative_tuple is not None and month_summary is None:
+            user_name = cumulative_tuple[2]
+
+        output.append(
+            UserHoursSummary(
+                user_id=user_id,
+                user_name=user_name,
+                month_total=month_total,
+                month_balance=month_balance,
+                cumulative_balance=cumulative_balance,
+            )
+        )
+
+    return output
 
 
 def build_month_report(
@@ -305,6 +468,7 @@ def build_month_report(
     tz_name: str,
     target_year: int,
     target_month: int,
+    cumulative_punches: list[Punch] | None = None,
     default_daily_target: timedelta = DEFAULT_DAILY_TARGET,
     daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None = None,
     work_modes_by_user: dict[int, dict[date, str]] | None = None,
@@ -314,6 +478,7 @@ def build_month_report(
         tz_name,
         target_year,
         target_month,
+        cumulative_punches=cumulative_punches,
         default_daily_target=default_daily_target,
         daily_target_overrides_by_user=daily_target_overrides_by_user,
         work_modes_by_user=work_modes_by_user,
@@ -399,6 +564,15 @@ def build_month_report(
         elif month_balance_kind == "negative":
             ws.cell(row=total_row, column=7).font = Font(color="991B1B", bold=True)
 
+        ws.append(["TOTAL ACUMULADO", "", "", "", "", _format_duration_hhmm(summary.cumulative_total), "", "", ""])
+        cumulative_row = ws.max_row
+        ws.cell(row=cumulative_row, column=1).font = Font(bold=True)
+        ws.cell(row=cumulative_row, column=6).font = Font(bold=True)
+        ws.cell(row=cumulative_row, column=1).fill = PatternFill("solid", fgColor="DBEAFE")
+        ws.cell(row=cumulative_row, column=6).fill = PatternFill("solid", fgColor="DBEAFE")
+        ws.cell(row=cumulative_row, column=1).alignment = center
+        ws.cell(row=cumulative_row, column=6).alignment = center
+
         ws.append([])
         ws.append(["LEGENDA", "", "", "", "", "", "", "", ""])
         legend_header_row = ws.max_row
@@ -459,6 +633,9 @@ def _render_user_table_png(summary: UserMonthlySummary, target_year: int, target
     ]
     month_balance_text, _month_balance_kind = _format_signed_duration_hhmm(summary.month_balance)
     rows.append(["TOTAL MENSAL", "", "", "", "", _format_duration_hhmm(summary.month_total), month_balance_text, "", ""])
+    rows.append(["TOTAL ACUMULADO", "", "", "", "", _format_duration_hhmm(summary.cumulative_total), "", "", ""])
+    month_total_row = len(rows) - 1
+    cumulative_total_row = len(rows)
 
     fig_height = max(4.5, len(rows) * 0.35)
     fig, ax = plt.subplots(figsize=(15.5, fig_height))
@@ -503,16 +680,21 @@ def _render_user_table_png(summary: UserMonthlySummary, target_year: int, target
                     cell.set_facecolor("#FEF3C7")
                     cell.set_text_props(color="#92400E", weight="bold")
 
-    total_row = len(rows)
     for c in range(len(headers)):
-        cell = table[(total_row, c)]
+        cell = table[(month_total_row, c)]
         cell.set_facecolor("#E2E8F0")
         if c in {0, 5, 6}:
             cell.set_text_props(weight="bold")
-    if rows[total_row - 1][6].startswith("+ "):
-        table[(total_row, 6)].set_text_props(color="#166534", weight="bold")
-    elif rows[total_row - 1][6].startswith("-"):
-        table[(total_row, 6)].set_text_props(color="#991B1B", weight="bold")
+    if rows[month_total_row - 1][6].startswith("+ "):
+        table[(month_total_row, 6)].set_text_props(color="#166534", weight="bold")
+    elif rows[month_total_row - 1][6].startswith("-"):
+        table[(month_total_row, 6)].set_text_props(color="#991B1B", weight="bold")
+
+    for c in range(len(headers)):
+        cell = table[(cumulative_total_row, c)]
+        cell.set_facecolor("#DBEAFE")
+        if c in {0, 5}:
+            cell.set_text_props(weight="bold")
 
     plt.title(
         f"Ponto {target_month:02d}/{target_year} - {summary.user_name}",
@@ -557,6 +739,7 @@ def build_month_report_images(
     tz_name: str,
     target_year: int,
     target_month: int,
+    cumulative_punches: list[Punch] | None = None,
     default_daily_target: timedelta = DEFAULT_DAILY_TARGET,
     daily_target_overrides_by_user: dict[int, dict[date, timedelta]] | None = None,
     work_modes_by_user: dict[int, dict[date, str]] | None = None,
@@ -566,6 +749,7 @@ def build_month_report_images(
         tz_name,
         target_year,
         target_month,
+        cumulative_punches=cumulative_punches,
         default_daily_target=default_daily_target,
         daily_target_overrides_by_user=daily_target_overrides_by_user,
         work_modes_by_user=work_modes_by_user,

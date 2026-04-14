@@ -26,6 +26,7 @@ Telegram bot to track work punches (`entrada`, `almoco`, `entrada_2`, and `saida
   - `/corrigir <date> <h1> <h2> <h3> <h4> [users]` (block correction for another day)
   - `/mes [month|date] [users]` (generate spreadsheet for requested month; default: current month)
   - `/mes_png [month|date] [users]` (generate per-user PNG for requested month; default: current month)
+  - `/resumo [month|date] [users]` (text summary: monthly worked hours, monthly balance, accumulated balance)
   - `/chat_id` (show current group chat ID)
 - Automatic monthly `.xlsx` report generation
 - Automatic alert at 20:00 when there are pending punches
@@ -145,12 +146,14 @@ git status
 - Punch records are partitioned by month into separate `.db` files.
 - To generate a manual spreadsheet, use `/mes` (default: current month).
 - To generate per-user table images, use `/mes_png` (default: current month).
+- To get a text summary (worked in month, monthly balance, accumulated balance), use `/resumo` (default: current month).
 - To choose report period, pass month/date in command:
   - Month: `YYYY-MM` or `MM/YYYY` (example: `/mes 03/2026`)
   - Date: `YYYY-MM-DD` or `DD/MM/YYYY` (example: `/mes 15/03/2026`)
 - To filter by users, append names after period (or directly after command):
   - Example: `/mes gustavo caio`
   - Example: `/mes_png 03/2026 gustavo`
+  - Example: `/resumo 03/2026 gustavo`
 - To delete punches, use `/clear [YYYY-MM-DD|DD/MM/YYYY] [users]`.
 - Today example: `/clear me coworker`.
 - Specific date example: `/clear 02/03/2026 gustavo caio`.

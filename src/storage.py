@@ -488,6 +488,69 @@ def list_daily_targets_for_month(
     return out
 
 
+def list_daily_targets_between(
+    chat_id: int,
+    start_day: date,
+    end_day: date,
+    user_ids: set[int] | None = None,
+) -> list[DailyTarget]:
+    if end_day <= start_day:
+        return []
+
+    start_utc = datetime(start_day.year, start_day.month, start_day.day, tzinfo=timezone.utc)
+    end_utc = datetime(end_day.year, end_day.month, end_day.day, tzinfo=timezone.utc)
+
+    out: list[DailyTarget] = []
+    for db_path in _iter_monthly_paths_between(start_utc, end_utc):
+        if not db_path.exists():
+            continue
+        with _connect(db_path) as conn:
+            _ensure_schema(conn)
+            if user_ids:
+                placeholders = ", ".join("?" for _ in user_ids)
+                params: list[object] = [
+                    chat_id,
+                    start_day.isoformat(),
+                    end_day.isoformat(),
+                    *sorted(user_ids),
+                ]
+                rows = conn.execute(
+                    f"""
+                    SELECT chat_id, user_id, user_name, target_day, target_minutes
+                    FROM daily_targets
+                    WHERE chat_id = ?
+                      AND target_day >= ?
+                      AND target_day < ?
+                      AND user_id IN ({placeholders})
+                    """,
+                    params,
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT chat_id, user_id, user_name, target_day, target_minutes
+                    FROM daily_targets
+                    WHERE chat_id = ?
+                      AND target_day >= ?
+                      AND target_day < ?
+                    """,
+                    (chat_id, start_day.isoformat(), end_day.isoformat()),
+                ).fetchall()
+
+        for row in rows:
+            out.append(
+                DailyTarget(
+                    chat_id=row["chat_id"],
+                    user_id=row["user_id"],
+                    user_name=row["user_name"],
+                    target_day=date.fromisoformat(row["target_day"]),
+                    target=timedelta(minutes=int(row["target_minutes"])),
+                )
+            )
+
+    return out
+
+
 def set_work_mode(
     chat_id: int,
     user_id: int,

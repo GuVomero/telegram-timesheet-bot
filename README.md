@@ -26,6 +26,7 @@ Bot de Telegram para registrar ponto (`entrada`, `almoco`, `entrada_2` e `saida`
   - `/corrigir <data> <h1> <h2> <h3> <h4> [usuarios]` (correção em bloco em outro dia)
   - `/mes [mes|data] [usuarios]` (gera planilha do mês solicitado; padrão: mês atual)
   - `/mes_png [mes|data] [usuarios]` (gera PNG por usuário do mês solicitado; padrão: mês atual)
+  - `/resumo [mes|data] [usuarios]` (gera resumo textual de horas/saldos do mês)
   - `/chat_id` (mostra o ID do grupo atual)
 - Geração automática mensal de planilha `.xlsx`
 - Aviso automático às 20:00 caso haja pendências no dia
@@ -148,12 +149,14 @@ git status
 - Os registros agora ficam particionados por mês em arquivos `.db` separados.
 - Para produzir planilha manualmente, use `/mes` (padrão: mês atual).
 - Para produzir imagens de tabela por usuário, use `/mes_png` (padrão: mês atual).
+- Para receber resumo textual (cumprido no mês, saldo mensal, saldo acumulado), use `/resumo` (padrão: mês atual).
 - Para escolher o período de relatório, informe mês/data no comando:
   - Mês: `YYYY-MM` ou `MM/YYYY` (ex.: `/mes 03/2026`)
   - Data: `YYYY-MM-DD` ou `DD/MM/YYYY` (ex.: `/mes 15/03/2026`)
 - Para filtrar por usuários, adicione os nomes após o período (ou direto após comando):
   - Ex.: `/mes gustavo caio`
   - Ex.: `/mes_png 03/2026 gustavo`
+  - Ex.: `/resumo 03/2026 gustavo`
 - Para apagar registros, use `/clear [YYYY-MM-DD|DD/MM/YYYY] [usuarios]`.
 - Exemplo hoje: `/clear eu colega`.
 - Exemplo em data especifica: `/clear 02/03/2026 gustavo caio`.
