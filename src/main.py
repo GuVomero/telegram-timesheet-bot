@@ -5,6 +5,7 @@ import os
 import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
+from html import escape
 import unicodedata
 from zoneinfo import ZoneInfo
 
@@ -1129,19 +1130,25 @@ async def resumo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_scope=targets,
     )
 
-    lines = [f"Resumo de horas {month:02d}/{year}:"]
+    lines = [f"<b>Resumo de horas {month:02d}/{year}</b>"]
     for summary in summaries:
+        safe_name = escape(summary.user_name)
         lines.append(
-            f"- {summary.user_name}: "
-            f"cumprido no mes {_format_duration_hhmm(summary.month_total)} | "
-            f"saldo mensal {_format_signed_duration_hhmm(summary.month_balance)} | "
-            f"saldo acumulado {_format_signed_duration_hhmm(summary.cumulative_balance)}"
+            "\n".join(
+                [
+                    "",
+                    f"<b>{safe_name}</b>",
+                    f"Cumprido no mes: <b>{_format_duration_hhmm(summary.month_total)}</b>",
+                    f"Saldo mensal: <b>{_format_signed_duration_hhmm(summary.month_balance)}</b>",
+                    f"Saldo acumulado: <b>{_format_signed_duration_hhmm(summary.cumulative_balance)}</b>",
+                ]
+            )
         )
 
     if not summaries:
         lines.append("- Sem dados para os usuarios informados.")
 
-    await update.effective_message.reply_text("\n".join(lines))
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def scheduled_monthly_report(context: CallbackContext) -> None:
